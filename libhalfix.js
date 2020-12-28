@@ -25,6 +25,8 @@
         this.config = this.buildConfiguration();
 
         this.onprogress = options["onprogress"] || function (a, b, c) { };
+
+        this.netSend = options["net_send"];
     }
 
     var _cache = [];
@@ -391,6 +393,7 @@
         }
     };
 
+
     // ========================================================================
     // Emscripten support code
     // ========================================================================
@@ -515,6 +518,29 @@
         // Run some primitive garbage collection
         gc();
     };
+
+    window["netSend"] = function(offset, length) {
+      var buf = u8.subarray(buffer, length + buffer);
+      if (_halfix.netSend) {
+        _halfix.netSend(buf);
+      }
+    }
+
+    window["netPollSet"] = function(cb) {
+      _halfix._netRecvCallback = cb;
+      console.log("callback set!", cb);
+    }
+
+    Halfix.prototype["netRecv"] = function (buff) {
+      var addr = alloc(len);
+      memcpy(addr, buff);
+
+      console.log("netRecv", buff.length);
+
+      dynCall_vii(this._netRecvCallback, addr, buff.length);
+
+      gc();
+    }
 
     global["drives"] = [];
 

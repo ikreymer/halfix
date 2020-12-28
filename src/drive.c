@@ -819,7 +819,7 @@ static inline int drive_simple_write_cache(struct simple_driver* info, void* buf
     return 0;
 }
 
-//#define ALLOW_READWRITE 1
+#define ALLOW_READWRITE 1
 
 static int drive_simple_write(void* this, void* cb_ptr, void* buffer, uint32_t size, drv_offset_t offset, drive_cb cb)
 {

@@ -246,6 +246,9 @@ int pc_init(struct pc_settings* pc)
 
     display_init();
 
+    ne2000_init(&pc->ne2000);
+
+
     //io_register_read(0x61, 1, bios_readb, NULL, NULL);
     io_register_read(0xB3, 1, bios_readb, NULL, NULL);
     io_register_read(0x511, 1, bios_readb, NULL, NULL);

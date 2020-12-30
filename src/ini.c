@@ -405,7 +405,7 @@ int parse_cfg(struct pc_settings* pc, char* data)
     if (net) {
         pc->ne2000.enabled = get_field_int(net, "enabled", 1);
         pc->ne2000.pci = get_field_int(net, "pci", pc->pci_enabled);
-        pc->ne2000.port_base = get_field_int(net, "iobase", 0x900);
+        pc->ne2000.port_base = get_field_int(net, "iobase", 0xc020);
         pc->ne2000.irq = get_field_int(net, "irq", 3);
         char* mac = get_field_string(net, "mac");
         if (!mac) {

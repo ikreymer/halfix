@@ -133,7 +133,8 @@ static int input_captured = 0;
 static void display_mouse_capture_update(int y)
 {
     input_captured = y;
-    SDL_WM_GrabInput(y);
+    fprintf(stderr, "Grab Input%d\n", y);
+    SDL_WM_GrabInput(y);// ? SDL_GRAB_ON : SDL_GRAB_OFF);
     SDL_ShowCursor(SDL_TRUE ^ y);
     mouse_enabled = y;
     display_set_title();
@@ -269,6 +270,12 @@ static int sdl_keysym_to_scancode(int sym)
         return 0x29;
     case SDLK_TAB:
         return 0x0F;
+    case 189:
+        return 0x0C;
+    case 187:
+        return 0x0D;
+    case 186:
+        return 0x27;
     default:
         printf("Unknown keysym: %d\n", sym);
         return KEYMOD_INVALID;
@@ -302,7 +309,6 @@ void display_handle_events(void)
             exit(0);
             break;
         case SDL_KEYDOWN: {
-            //printf("KeyDown\n");
             display_set_title();
             send_keymod_scancode(event.key.keysym.mod, 0);
             display_kbd_send_key(sdl_keysym_to_scancode(event.key.keysym.sym));
@@ -321,9 +327,9 @@ void display_handle_events(void)
                 break;
             case SDL_BUTTON_RIGHT:
 #ifndef EMSCRIPTEN
-                if (k == MOUSE_STATUS_PRESSED && !mouse_enabled) // Don't send anything
-                    display_mouse_capture_update(1);
-                else
+                display_mouse_capture_update(1);
+                //if (k == MOUSE_STATUS_PRESSED && !mouse_enabled) // Don't send anything
+                //else
 #endif
                     kbd_mouse_down(MOUSE_STATUS_NOCHANGE, MOUSE_STATUS_NOCHANGE, k);
                 break;
@@ -331,6 +337,7 @@ void display_handle_events(void)
             break;
         }
         case SDL_MOUSEMOTION: {
+            //printf("mouse move\n");
             if (input_captured)
                 kbd_send_mouse_move(event.motion.xrel, event.motion.yrel);
             break;
@@ -379,9 +386,9 @@ void display_init(void)
 #endif
 
     resized = 0;
-#ifdef EMSCRIPTEN
+//#ifdef EMSCRIPTEN
     display_mouse_capture_update(1);
-#endif
+//#endif
 }
 void display_sleep(int ms)
 {

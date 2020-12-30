@@ -10,20 +10,21 @@
 #include <string.h> // memcpy
 
 
-//#define NELOG
+//#define NEDEBUG
 
-#ifdef NELOG
 #ifndef EMSCRIPTEN
 #define LOGN(component, x, ...) fprintf(stderr, "[" component "] " x, ##__VA_ARGS__)
 #else
 #define LOGN(component, x, ...) printf("[" component "] " x, ##__VA_ARGS__)
 #endif
-#else
-#define LOGN(...) 
-#endif
 
 #define NE2K_LOG(x, ...) LOGN("NE2K", x, ##__VA_ARGS__)
+
+#ifdef NEDEBUG
 #define NE2K_DEBUG(x, ...) LOGN("NE2K", x, ##__VA_ARGS__)
+#else
+#define NE2K_DEBUG(x, ...)
+#endif
 
 #ifndef EMSCRIPTEN
 #define NE2K_FATAL(x, ...) FATAL("NE2K", x, ##__VA_ARGS__)
@@ -109,49 +110,81 @@ struct ne2000 {
     int enabled;
 } ne2000;
 
+/*
 static void ne2000_reset_internal(int software)
 {
     if (software) {
         ne2000.isr = ISR_RST;
         return;
     } else {
+        ne2000.isr = ISR_RST;
         ne2000.pagestart = 0x40 << 8;
         ne2000.pagestop = 0x80 << 8;
         ne2000.bnry = 0x4C << 8;
         ne2000.cmd = CMD_STP;
     }
 }
+*/
+
+uint8_t mac_address[6];
+
+
 static void ne2000_reset(void)
 {
-    ne2000_reset_internal(0);
+  //ne2000_reset_internal(0);
+
+  for (int i = 0; i < 6; i++) {
+      int val = mac_address[i];
+      ne2000.mem[i << 1] = ne2000.mem[(i << 1) | 1] = val;
+  }
+
+  ne2000.mem[14 << 1] = ne2000.mem[14 << 1 | 1] = 0x57;
+  ne2000.mem[15 << 1] = ne2000.mem[15 << 1 | 1] = 0x57;
+
+  ne2000.isr = ISR_RST;
+  ne2000.pagestart = 0x40 << 8;
+  ne2000.pagestop = 0x80 << 8;
+  ne2000.bnry = 0x4C;
+  ne2000.cmd = CMD_STP;
+
+  //ne2000_lower_irq();
 }
 
-static void ne2000_trigger_irq(int flag)
+static void ne2000_trigger_irq(flag)
 {
+//    ne2000.isr |= flag;
+//    if (!((ne2000.isr & ne2000.imr) & flag))
+//        return;
     ne2000.isr |= flag;
-    if (!((ne2000.isr & ne2000.imr) & flag))
-        return;
 
     NE2K_DEBUG("Triggering IRQ! (isr=%02x imr=%02x &=%02x)\n", ne2000.isr, ne2000.imr, ne2000.isr & ne2000.imr);
 
+    int isr = (ne2000.isr & ne2000.imr) & 0x7f;
+
     // XXX -- the PIC doesn't support edge/level triggered interrupts yet, so we simulate it this way
-    pci_set_irq_line(NE2K_DEVID, 0);
-    pci_set_irq_line(NE2K_DEVID, 1);
+    if (isr) {
+      NE2K_DEBUG("IRQ Raise\n");
+      pci_set_irq_line(NE2K_DEVID, 0);
+      pci_set_irq_line(NE2K_DEVID, 1);
+    } else {
+      NE2K_DEBUG("IRQ Lower\n");
+      pci_set_irq_line(NE2K_DEVID, 0);
+    }
 }
-static void ne2000_lower_irq(void)
-{
-    pci_set_irq_line(NE2K_DEVID, 0);
-}
+
 
 static uint32_t ne2000_asic_mem_read(void)
 {
     if (!(ne2000.dcr & DCR_WTS)) { // Byte-sized DMA transfers
-        if (ne2000.rsar >= NE2K_MEMSZ) // Ignore out of bounds accesses
+        if (ne2000.rsar >= NE2K_MEMSZ) {// Ignore out of bounds accesses
+            NE2K_LOG("OOB read 1 byte\n");
             return 0xFF;
+        }
         uint8_t data = ne2000.mem[ne2000.rsar++];
         ne2000.rbcr--;
         if (!ne2000.rbcr)
             ne2000_trigger_irq(ISR_RDC);
+        NE2K_DEBUG("asic 1 byte %d, ret = %02x\n", ne2000.rbcr, data);
         return data;
     } else { // Word-sized DMA transfers
         if (ne2000.rsar & 1) {
@@ -159,27 +192,36 @@ static uint32_t ne2000_asic_mem_read(void)
             // In the manual, it says that A0 is forced to zero
             ne2000.rsar &= ~1;
         }
-        if (ne2000.rsar >= NE2K_MEMSZ) // Ignore out of bounds accesses
+        if (ne2000.rsar >= NE2K_MEMSZ) {// Ignore out of bounds accesses
+            NE2K_LOG("OOB read 2 byte\n");
             return 0xFFFF;
+        }
         uint16_t data = ne2000.mem[ne2000.rsar] | (ne2000.mem[ne2000.rsar + 1] << 8);
 
         ne2000.rsar += 2;
         ne2000.rbcr -= 2;
 
+        NE2K_DEBUG("read asic 2 byte %d, %04x = %04x\n", ne2000.rbcr, ne2000.rsar, data);
+
         if (!ne2000.rbcr)
             ne2000_trigger_irq(ISR_RDC);
+ 
         return data;
     }
 }
 
 static void ne2000_asic_mem_write(uint32_t data)
 {
-    if (!ne2000.rbcr)
+    if (!ne2000.rbcr) {
       return;
+    }
 
     if (!(ne2000.dcr & DCR_WTS)) { // Byte-sized DMA transfers
-        if (ne2000.rsar >= NE2K_MEMSZ) // Ignore out of bounds accesses
+        if (ne2000.rsar >= NE2K_MEMSZ) {// Ignore out of bounds accesses
+            NE2K_LOG("OOB write 1 byte\n");
             return;
+        }
+        NE2K_DEBUG("write asic 1 byte %d, %04x = %02x\n", ne2000.rbcr, ne2000.rsar, data);
         ne2000.mem[ne2000.rsar++] = data;
         ne2000.rbcr--;
         if (!ne2000.rbcr)
@@ -189,8 +231,11 @@ static void ne2000_asic_mem_write(uint32_t data)
             NE2K_LOG("Unaligned RSAR -- forcing alignment\n");
             ne2000.rsar &= ~1;
         }
-        if (ne2000.rsar >= NE2K_MEMSZ) // Ignore out of bounds accesses
+        if (ne2000.rsar >= NE2K_MEMSZ) {// Ignore out of bounds accesses
+            NE2K_LOG("OOB read 2 byte\n");
             return;
+        }
+        NE2K_DEBUG("write asic 2 byte %d, %04x = %04x\n", ne2000.rbcr, ne2000.rsar, data);
         ne2000.mem[ne2000.rsar] = data;
         ne2000.mem[ne2000.rsar + 1] = data >> 8;
 
@@ -242,7 +287,7 @@ static uint32_t ne2000_read0(uint32_t port)
     case 14:
     case 15:
         retv = ne2000.cntr[port - 13];
-        NE2K_DEBUG("CNTR%d: read %02x\n", port - 13, retv);
+        NE2K_LOG("CNTR%d: read %02x\n", port - 13, retv);
         break;
     default:
         NE2K_FATAL("PAGE0 read %02x\n", port);
@@ -260,7 +305,7 @@ static uint32_t ne2000_read1(uint32_t port)
         break;
     case 7:
         retv = ne2000.curr >> 8;
-        NE2K_DEBUG("CURR: read %02x\n", retv);
+        NE2K_LOG("CURR: read %02x\n", retv);
         break;
     case 8 ... 15:
         retv = ne2000.multicast[port & 7];
@@ -284,7 +329,10 @@ static uint32_t ne2000_read(uint32_t port)
         case 1:
             return ne2000_read1(port & 31);
         case 3:
-            printf("page 3 %02x\n", port);
+            NE2K_LOG("read page 3 %d\n", (port & 31));
+            if ((port & 31) == 6 || (port & 31) == 5) {
+              return 0x40;
+            }
             return 0;
         default:
             NE2K_FATAL("todo: (offs %02x) implement page %d\n", port & 31, ne2000.cmd >> 6 & 3);
@@ -293,6 +341,9 @@ static uint32_t ne2000_read(uint32_t port)
     case 16: // asic data read port
         return ne2000_asic_mem_read();
     case 31:
+        NE2K_LOG("reset\n");
+        ne2000.isr = ISR_RST;
+        ne2000_trigger_irq(0);
         return 0;
     default:
         NE2K_FATAL("TODO: read port=%08x\n", port);
@@ -303,6 +354,7 @@ static uint32_t ne2000_read(uint32_t port)
 static uint32_t ne2000_read_mem16(uint32_t port)
 {
     UNUSED(port);
+    NE2K_DEBUG("asic mem16: %d\n", ne2000.dcr);
     if (ne2000.dcr & DCR_WTS)
         return ne2000_asic_mem_read();
     else {
@@ -313,6 +365,7 @@ static uint32_t ne2000_read_mem16(uint32_t port)
 static uint32_t ne2000_read_mem32(uint32_t port)
 {
     UNUSED(port);
+    NE2K_DEBUG("asic mem32: %d\n", ne2000.dcr);
     if (ne2000.dcr & DCR_WTS) {
         int retval = ne2000_asic_mem_read();
         retval |= ne2000_asic_mem_read() << 16;
@@ -330,35 +383,45 @@ static void ne2000_write0(uint32_t port, uint32_t data)
 {
     switch (port) {
     case 1: // Page start
-        NE2K_DEBUG("PageStart write: %02x\n", data);
+        NE2K_LOG("PageStart write: %02x\n", data);
         ne2000.pagestart = (data << 8) & 0xFF00;
         break;
     case 2: // Page stop
-        NE2K_DEBUG("PageStop write: %02x\n", data);
+        NE2K_LOG("PageStop write: %02x\n", data);
         ne2000.pagestop = (data << 8) & 0xFF00;
         break;
     case 3: // Boundary pointer
-        NE2K_DEBUG("Boundary write: %02x\n", data);
-        ne2000.bnry = data;
+        NE2K_LOG("Boundary write: %02x\n", data);
+        //if (data < 0x80) {
+          ne2000.bnry = data;
+        //}
         break;
     case 4:
         NE2K_DEBUG("TPSR: %02x\n", data);
         ne2000.tpsr = (data << 8) & 0xFF00;
         break;
     case 5: // TCNT low
-    case 6: { // TCNT hi
-        int b0 = (port & 1) << 3;
-        // Replace the (upper|lower) byte based on the I/O port
-        ne2000.tcnt = (ne2000.tcnt & (0xFF << b0)) | (data << (b0 ^ 8));
-        NE2K_DEBUG("TCNT: %04x\n", ne2000.tcnt);
+        NE2K_DEBUG("TCNT low: %02x\n", data);
+        ne2000.tcnt = (ne2000.tcnt & 0xFF00) | data;
         break;
-    }
+    case 6: // TCNT
+        NE2K_DEBUG("TCNT high: %02x\n", data);
+        ne2000.tcnt = (ne2000.tcnt & 0x00FF) | (data << 8);
+        break;
+//     case 5: // TCNT low
+//     case 6: { // TCNT hi
+//        int b0 = (port & 1) << 3;
+        // Replace the (upper|lower) byte based on the I/O port
+//        ne2000.tcnt = (ne2000.tcnt & (0xFF << b0)) | (data << (b0 ^ 8));
+//        NE2K_DEBUG("TCNT: %04x\n", ne2000.tcnt);
+//        break;
+//    }
     case 7: // ISR
         ne2000.isr &= ~(data & 0x7f);
-        if (!data)
-            ne2000_lower_irq();
-        NE2K_DEBUG("ISR ack: %02x\n", ne2000.isr);
+        //if ((ne2000.isr & ne2000.imr) == 0)
+        NE2K_DEBUG("ISR ack: %02x %02x\n", ne2000.isr, data);
         ne2000_trigger_irq(0);
+        //ne2000_trigger_irq(0);
         break;
     case 8: // Remote start address register
         NE2K_DEBUG("RSAR low: %02x\n", data);
@@ -406,11 +469,11 @@ static void ne2000_write1(uint32_t port, uint32_t data)
         break;
     case 7:
         ne2000.curr = data << 8;
-        NE2K_DEBUG("CURR: read %02x\n", data);
+        NE2K_LOG("CURR: write %02x\n", data);
         break;
     case 8 ... 15:
         ne2000.multicast[port & 7] = data;
-        NE2K_DEBUG("Multicast%d: %02x\n", port & 7, data);
+        NE2K_DEBUG("MULTI%d: %02x write\n", port & 7, data);
         break;
     default:
         NE2K_FATAL("todo: page1 implement port %d\n", port & 31);
@@ -447,6 +510,7 @@ static void ne2000_write(uint32_t port, uint32_t data)
                 net_send(&ne2000.mem[ne2000.tpsr], ne2000.tcnt);
                 ne2000.tsr = 1;
                 ne2000.cmd &= ~CMD_TXP;
+                NE2K_LOG("IRQ sent (%d)\n", ne2000.imr);
                 ne2000_trigger_irq(ISR_PTX); // TODO: timing
             }
             break; // TODO
@@ -463,7 +527,7 @@ static void ne2000_write(uint32_t port, uint32_t data)
             ne2000_write1(port & 31, data);
             break;
         case 3:
-            printf("write page 3: %d\n", (ne2000.cmd >> 6 & 3));
+            NE2K_LOG("write page 3: %d %02x\n", (port & 31), data);
             break;
         default:
             NE2K_FATAL("todo: (offs %d/data %02x) implement page %d\n", port & 31, data, ne2000.cmd >> 6 & 3);
@@ -473,8 +537,9 @@ static void ne2000_write(uint32_t port, uint32_t data)
         ne2000_asic_mem_write(data);
         break;
     case 31: // Reset port
-        NE2K_LOG("Software reset\n");
-        ne2000_reset_internal(1);
+        NE2K_LOG("reset clear\n");
+        //NE2K_LOG("Software reset\n");
+        //ne2000_reset_internal(1);
         break;
 
     default:
@@ -525,24 +590,78 @@ static void ne2000_pci_remap(uint8_t* dev, unsigned int newbase)
         NE2K_LOG("Remapped controller to 0x%x\n", ne2000.iobase);
     }
 }
+
+
+
+static const uint8_t ne2000_config_space[] = {
+    0xec, 0x10, 0x29, 0x80, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+    (0x900 & 0xFF) | 1, 0x900 >> 8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
+    0x00, 0x00, 0xb8, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00
+};
+
+
 /*
 static int ne2000_pci_write(uint8_t* ptr, uint8_t addr, uint8_t data)
 {
-  UNUSED(ptr);
-  UNUSED(addr);
-  UNUSED(data);
-  return 1;
+  switch (addr) {
+    case 4:
+      ptr[0x04] = data & 3;
+      return 1;
+ 
+    case 0x10: 
+      ptr[0x10] = (data & 0xFF) | 1;
+      return 1;
+
+    case 0x11: {
+      ptr[0x11] = data;
+      unsigned int newbase = (ptr[0x10] | (data << 8));
+      if (newbase != 0xFFFE) {
+          if (newbase & 1) {
+              ne2000_pci_remap(ptr, newbase & ~31);
+              NE2K_LOG("pci remap %2x\n", newbase & ~31);
+          }
+      }
+    }
+    return 1;
+
+    case 0x30 ... 0x33: // option rom -- ignore since we don't have one (and it messes with non-PCI vga)
+      return 1;
+
+    case 0x3C: // interrupt pin
+      return 0;
+
+    case 5 ... 7:
+      return 0;
+  }
+
+  if (addr < sizeof(ne2000_config_space)) {
+    if (data != ne2000_config_space[addr]) {
+      NE2K_LOG("Pos: %d, Orig %02x, Curr %02x, New %02x\n", addr, data, ptr[addr], ne2000_config_space[addr]);
+    }
+    ptr[addr] = ne2000_config_space[addr];
+    return 1;
+  } else {
+    NE2K_LOG("Invalid config addr: %02x", addr);
+    return 0;
+  }
 }
 */
 
 
 static int ne2000_pci_write(uint8_t* ptr, uint8_t addr, uint8_t data)
 {
+    if (ne2000.iobase + addr > 0xFFFF) {
+      printf("pci overflow? %02x\n", addr);
+      return 1;
+    }
+
     switch (addr) {
-    case 4:
+    case 0x04:
         ptr[0x04] = data & 3;
         return 1;
-    case 5 ... 7:
+    case 0x00 ... 0x03:
+    case 0x05 ... 0x0e:
         return 0; // ?
     case 0x10:
         ptr[0x10] = data | 1;
@@ -550,7 +669,7 @@ static int ne2000_pci_write(uint8_t* ptr, uint8_t addr, uint8_t data)
     case 0x11: {
         ptr[0x11] = data;
         unsigned int newbase = (ptr[0x10] | (data << 8));
-        if (newbase != 0xFFFE) {
+        if (newbase != 0xFFFE && newbase != 0xFFE0) {
             if (newbase & 1) {
                 ne2000_pci_remap(ptr, newbase & ~31);
                 NE2K_LOG("pci remap %2x\n", newbase & ~31);
@@ -570,26 +689,43 @@ static int ne2000_pci_write(uint8_t* ptr, uint8_t addr, uint8_t data)
         return 0;
     default:
         //NE2K_FATAL("unknown pci value: offs=0x%02x data=%02x\n", addr, data);
-        NE2K_LOG("unknown pci value: offs=0x%02x data=%02x\n", addr, data);
-        return 0;
+        NE2K_LOG("Pos: %02x, Orig %02x, Curr %02x, v86 %02x\n", addr, data, ptr[addr], ne2000_config_space[addr]);
+        ptr[addr] = ne2000_config_space[addr];
+        //NE2K_LOG("unknown pci value: offs=0x%02x data=%02x\n", addr, data);
+        return 1;
     }
 }
 
 
-static const uint8_t ne2000_config_space[16] = {
-    0xec, 0x10, 0x29, 0x80, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00};
-/*
-    (0x900 & 0xFF) | 1, 0x900 >> 8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
-    0x00, 0x00, 0xb8, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00
-};*/
+static int is_full()
+{
+    int avail, boundary;
 
+    if (ne2000.pagestop <= ne2000.pagestart) {
+        printf("pagestop < pagestart\n");
+        return 1;
+    }
+
+    boundary = ne2000.bnry << 8;
+
+    if (ne2000.curr < boundary)
+        avail = boundary - ne2000.curr;
+    else
+        avail = (ne2000.pagestop - ne2000.pagestart) - (ne2000.curr - boundary);
+    if (avail < (1514 + 4)) {
+        printf("avail %d curr %d bnry %d\n", avail, ne2000.curr, boundary);
+        return 1;
+    }
+
+    return 0;
+}
 
 
 static void ne2000_pci_init(struct ne2000_settings* conf)
 {
     UNUSED(ne2000_pci_write);
     uint8_t* dev = pci_create_device(0, NE2K_DEVID, 0, NULL);//&ne2000_pci_write);
+    //uint8_t* dev = pci_create_device(0, NE2K_DEVID, 0, &ne2000_pci_write);
     pci_copy_default_configuration(dev, (void*)ne2000_config_space, 16);
 
     dev[0x3D] = 1;
@@ -604,7 +740,54 @@ static void ne2000_receive(void* data, int len)
     // Don't acknowledge if stop bit set
     // PCap gets some spurious packets before it's initialized
     if (ne2000.cmd & CMD_STP) {
+        printf("ignore, stopped\n");
         return;
+    }
+
+    if (is_full()) {
+        printf("full, skipping!\n");
+        return;
+    }
+
+    uint8_t *data8 = data;
+
+    if (ne2000.rcr & 0x10) {
+      // promiscuous: receive all
+      printf("recv all\n");
+    } else {
+      if (data8[0] == 0xff && data8[1] == 0xff && data8[2] == 0xff &&
+          data8[3] == 0xff && data8[4] == 0xff && data8[5] == 0xff) {
+
+        printf("recv braodcast\n");
+        // broadcast 
+        if (!(ne2000.rcr & 0x04)) {
+          printf("broadcast skip\n");
+          return;
+        }
+
+      } else if (data8[0] & 0x01) {
+
+        printf("recv multicast\n");
+
+        if (!(ne2000.rcr & 0x08)) {
+          printf("multicast skip\n");
+          return;
+        }
+
+      } else {
+
+      }
+    }
+    
+    uint8_t buf1[60];
+
+    if (len < 60) {
+        NE2K_LOG("Expand recv buffer to 60!\n");
+        memcpy(buf1, data, len);
+        memset(buf1 + len, 0, 60 - len);
+        data = buf1;
+        data8 = buf1;
+        len = 60;
     }
 
     // Format of a packet (as received by the emulated system):
@@ -613,7 +796,7 @@ static void ne2000_receive(void* data, int len)
     //  [2 ... 3]: Size of packet
 
     int length_plus_header = 4 + len;
-    int total_pages = (length_plus_header + 255) >> 8;
+    //int total_pages = (length_plus_header + 255) >> 8;
 
     // Determine the start, end, etc.
     int start = ne2000.curr;
@@ -624,35 +807,12 @@ static void ne2000_receive(void* data, int len)
     }
 
 
-    uint8_t *memstart = ne2000.mem + start,
-            *data8 = data;
+    uint8_t *memstart = ne2000.mem + start;
 
 
-    printf("recv %02x %02x %02x %02x %02x %02x\n", data8[0], data8[1], data8[2], data8[3], data8[4], data8[5]);
+    //printf("recv %02x %02x %02x %02x %02x %02x\n", data8[0], data8[1], data8[2], data8[3], data8[4], data8[5]);
 
-/*
-    if (ne2000.rcr & 0x10) {
-      // promiscuous: receive all
-    } else {
-      if (data8[0] == 0xff && data8[1] == 0xff && data8[2] == 0xff &&
-          data8[3] == 0xff && data8[4] == 0xff && data8[5] == 0xff) {
 
-     
-      NE2K_LOG("broadcast!");
-      // broadcast 
-        if (!(ne2000.rcr & 0x04))
-          return;
-
-      } else if (data8[0] & 0x01) {
-        // broadcast 
-        if (!(ne2000.rcr & 0x08))
-          return;
-
-      } else {
-
-      }
-    }
-*/
     ne2000.rsr = 1; // properly received
 
     if (data8[0] & 1)
@@ -666,21 +826,23 @@ static void ne2000_receive(void* data, int len)
     if ( // If our starting page is less than the next page...
         (ne2000.curr < nextpg) ||
         // Or if we fit perfectly into the pagestart-pageend area
-        (ne2000.curr + total_pages == ne2000.pagestop)) {
+        ((ne2000.curr + 4 + len) <= ne2000.pagestop)) {
         memcpy(memstart + 4, data, len); // We've already written the packet address
+
+        NE2K_LOG("Recv to page %02x, next %02x\n", ne2000.curr, nextpg);
     } else {
         // What if the packet is too big?
-        int len1 = ne2000.pagestop - ne2000.curr;
-        memcpy(memstart + 4, data, len1 - 4);
+        int len1 = ne2000.pagestop - (ne2000.curr + 4);
+        memcpy(memstart + 4, data, len1);
 
         memstart = ne2000.mem + ne2000.pagestart;
         // Copy the rest of the bytes to the beginning of pagestart
-        printf("addr=%p len=%d\n", data + (len1 - 4), len - (len1 + 4));
-        if ((len - (len1 + 4)) < 0) {
+        NE2K_LOG("addr=%p len=%d\n", data + len1, len - len1);
+        if ((len - len1) < 0) {
           NE2K_FATAL("Not enough memory for packet!");
         }
             //__asm__("int3");
-        memcpy(memstart, data + (len1 - 4), len - (len1 + 4));
+        memcpy(memstart, data + len1, len - len1);
     }
     ne2000.curr = nextpg;
     ne2000_trigger_irq(ISR_PRX);
@@ -711,34 +873,29 @@ void ne2000_init(struct ne2000_settings* conf)
     if (macsum == 0) {
         // XXX - we hard-code this now to make our code output deterministic.
         conf->mac_address[0] = 0x00;
-        conf->mac_address[1] = 0x22;
-        conf->mac_address[2] = 0x15;
-        conf->mac_address[3] = 0x10;
-        conf->mac_address[4] = 0x11;
-        conf->mac_address[5] = 0x12;
+        conf->mac_address[1] = 0x23;
+        conf->mac_address[2] = 0x34;
+        conf->mac_address[3] = 0x56;
+        conf->mac_address[4] = 0x78;
+        conf->mac_address[5] = 0xab;
     }
 
-    for (int i = 0; i < 6; i++) {
-        int val = conf->mac_address[i];
-        ne2000.mem[i << 1] = ne2000.mem[(i << 1) | 1] = val;
-    }
-
-    ne2000.mem[14 << 1] = ne2000.mem[14 << 1 | 1] = 0x57;
-    ne2000.mem[15 << 1] = ne2000.mem[15 << 1 | 1] = 0x57;
+    memcpy(&mac_address, &conf->mac_address, 6);
 
     if (conf->pci) {
         ne2000_pci_init(conf);
     } else {
         ne2000.iobase = conf->port_base & ~31;
         ne2000.irq = conf->irq & 15;
-        io_register_read(0x300, 32, ne2000_read, NULL, NULL);
-        io_register_write(0x300, 32, ne2000_write, NULL, NULL);
-        io_register_read(0x300 + 16, 1, ne2000_read, ne2000_read_mem16, ne2000_read_mem32);
-        io_register_write(0x300 + 16, 1, ne2000_write, ne2000_write_mem16, ne2000_write_mem32);
+        io_register_read(0x900, 32, ne2000_read, NULL, NULL);
+        io_register_write(0x900, 32, ne2000_write, NULL, NULL);
+        io_register_read(0x900 + 16, 1, ne2000_read, ne2000_read_mem16, ne2000_read_mem32);
+        io_register_write(0x900 + 16, 1, ne2000_write, ne2000_write_mem16, ne2000_write_mem32);
         //io_register_write(0x300 + 31, 1, NULL, ne2000_write, NULL);
     }
 
     io_register_reset(ne2000_reset);
+    ne2000_reset();
 
     ne2000_poll();
 }
